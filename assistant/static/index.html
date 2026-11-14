@@ -9,6 +9,9 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600&family=Barlow:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="/static/style.css">
+<!-- Le style propre au coffre ouvert (<coffre>/.assistant/style.css), pose
+     apres le style par defaut pour pouvoir le surcharger. Vide s'il n'existe pas. -->
+<link id="style-coffre" rel="stylesheet" href="/coffre/style.css">
 </head>
 <body data-pret="non">
 
@@ -42,7 +45,7 @@
         <circle cx="12" cy="12" r="11"></circle>
       </svg>
       <div class="marque-texte">
-        <span class="marque-titre">Assistant de MJ</span>
+        <span id="marque-titre" class="marque-titre">Assistant de MJ</span>
         <span id="coffre-nom" class="marque-sous">—</span>
       </div>
     </div>

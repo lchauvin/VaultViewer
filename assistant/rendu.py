@@ -74,6 +74,21 @@ _LIEN = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
 _GRAS = re.compile(r"\*\*([^*]+)\*\*")
 _ITAL = re.compile(r"(?<![\*\w])\*([^*\n]+)\*(?!\*)")
 _BARRE = re.compile(r"~~([^~]+)~~")
+# Les formules, a la maniere d'Obsidian : $$...$$ en bloc, $...$ en ligne. Le
+# $ ouvrant n'est pas suivi d'un espace, le fermant n'en suit pas et n'est pas
+# suivi d'un chiffre ni d'une lettre : « 5 $ et 10 $ », ou les variables de
+# PixelMath (« iif($T < 0, 0, $T) »), restent du texte.
+_MATH_BLOC = re.compile(r"\$\$(.+?)\$\$")
+_MATH = re.compile(r"(?<![\\$])\$(?=[^\s$])((?:\\.|[^$\\\n])+?)(?<=[^\s\\])\$(?![\w$])")
+_MATH_OUVRE = re.compile(r"^\s*\$\$")
+
+
+def formule(tex: str, bloc: bool = False, balise: str = "span") -> str:
+    """Le TeX tel quel, echappe, dans un element que le navigateur rendra
+    (KaTeX). Sans KaTeX, la source reste lisible. Une formule en bloc au
+    milieu d'un paragraphe reste un <span> : pas de <div> dans un <p>."""
+    classe = "math math-bloc" if bloc else "math"
+    return '<%s class="%s">%s</%s>' % (balise, classe, html.escape(tex.strip() if bloc else tex), balise)
 
 # Resolveur de lien : nom -> (url, existe) ; None pour ne pas rendre de lien.
 Resolveur = Callable[[str], tuple[str, bool] | None]
@@ -89,6 +104,9 @@ def rendre_en_ligne(texte: str, resoudre: Resolveur | None = None) -> str:
 
     # Le code en ligne est mis de cote : rien ne doit etre interprete dedans.
     texte = _CODE.sub(lambda m: garder("<code>" + html.escape(m.group(1)) + "</code>"), texte)
+    # Les formules aussi : leurs * et _ ne sont pas du gras ni de l'italique.
+    texte = _MATH_BLOC.sub(lambda m: garder(formule(m.group(1), bloc=True)), texte)
+    texte = _MATH.sub(lambda m: garder(formule(m.group(1))), texte)
 
     def wiki(m: re.Match) -> str:
         cible = m.group(1).strip()
@@ -199,6 +217,28 @@ def rendre(
             )
             continue
 
+        # Formule en bloc : de $$ a $$, sur une ou plusieurs lignes.
+        if _MATH_OUVRE.match(ligne):
+            reste = ligne.strip()[2:]
+            if "$$" in reste:
+                tex, apres = reste.split("$$", 1)
+                if not apres.strip():
+                    sortie.append(formule(tex, bloc=True, balise="div"))
+                    i += 1
+                    continue
+            else:
+                contenu_math = [reste]
+                j = i + 1
+                while j < n and "$$" not in lignes[j]:
+                    contenu_math.append(lignes[j])
+                    j += 1
+                if j < n and not lignes[j].split("$$", 1)[1].strip():
+                    contenu_math.append(lignes[j].split("$$", 1)[0])
+                    sortie.append(formule("\n".join(contenu_math), bloc=True, balise="div"))
+                    i = j + 1
+                    continue
+                # Pas de $$ fermant : du texte ordinaire.
+
         if _REGLE.match(ligne):
             sortie.append("<hr>")
             i += 1
@@ -257,6 +297,7 @@ def rendre(
                 or _NUM.match(courante)
                 or _CLOTURE.match(courante)
                 or _REGLE.match(courante)
+                or (para and _MATH_OUVRE.match(courante))
             ):
                 break
             if "|" in courante and i + 1 < n and _TABLE_SEP.match(lignes[i + 1]):

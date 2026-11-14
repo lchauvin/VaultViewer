@@ -466,6 +466,10 @@ body.vue-assistant .colonne-centre { display: none; }
 .page code { font-family: var(--mono); font-size: 0.88em; padding: 1px 4px; background: var(--surface-haut); border-radius: var(--r1); }
 .page pre { background: var(--surface); border: 1px solid var(--filet); border-radius: var(--r2); padding: var(--e3); overflow-x: auto; margin: 0 0 var(--e4); }
 .page pre code { background: none; padding: 0; font-size: 12.5px; }
+/* Formules : le TeX brut tant que KaTeX n'est pas la (ou hors ligne). */
+.page .math:not([data-rendue]) { font-family: var(--mono); font-size: 0.88em; color: var(--texte-doux); }
+.page .math-bloc { display: block; margin: 0 0 var(--e4); overflow-x: auto; overflow-y: hidden; }
+.page .math-bloc:not([data-rendue]) { white-space: pre-wrap; padding: var(--e3); background: var(--surface); border-radius: var(--r2); }
 .page blockquote {
   margin: 0 0 var(--e4); padding: var(--e2) var(--e4);
   border-left: 2px solid var(--accent-sombre); color: var(--texte-doux);

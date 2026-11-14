@@ -15,9 +15,11 @@ ou les alias apparaissent dans la question, plus les pages epinglees.
 
 from __future__ import annotations
 
+import json
 import urllib.parse
 from typing import Callable, Iterator
 
+from . import profil as profils
 from . import rendu
 from .coffre import Index, Page, plier
 from .ecriture import Ecriture, EcritureRefusee, blocs_de
@@ -35,6 +37,13 @@ INSTRUCTIONS_GENERIQUES = """\
 Tu assistes la personne qui mene une partie de jeu de role. Le coffre de notes
 ci-dessous est la seule source de verite : appuie-toi sur lui, cite tes sources,
 et n'invente jamais une regle sans dire clairement que tu improvises.
+"""
+
+# Un coffre de documentation sans CLAUDE.md : rien n'y parle de partie.
+INSTRUCTIONS_DOCUMENTATION = """\
+Tu aides a consulter une base de documentation. Le coffre de notes ci-dessous
+est la seule source de verite : appuie-toi sur lui, cite tes sources, et
+n'affirme jamais ce qu'il ne dit pas sans le signaler clairement.
 """
 
 CONSIGNE_CITATION = """\
@@ -106,6 +115,29 @@ d'un clic, sous ta reponse.
 - Ne propose d'ecrire que si le MJ le demande ou l'accepte. Dans ta reponse,
   dis en une ou deux phrases ce que tu proposes ; ne recopie pas le contenu,
   le MJ le voit dans la proposition.
+"""
+
+# La meme consigne pour un coffre qui n'est pas un jeu : ni personnages, ni
+# campagne, ni canon.
+CONSIGNE_ECRITURE_DOCUMENTATION = """\
+# Ecrire dans le coffre
+
+Tu peux PROPOSER d'ecrire dans le coffre : creer une page (une note, une
+synthese, un plan) ou completer une page existante. Rien n'est ecrit tant que
+l'utilisateur n'a pas valide ta proposition d'un clic, sous ta reponse.
+
+- Dossiers ou tu peux ecrire : {dossiers}. Jamais ailleurs, et jamais dans un
+  dossier ou une page dont le nom commence par `_`.
+- Pour creer a partir d'un modele du coffre, reprends sa structure et ses
+  metadonnees, et laisse vides les champs que tu ne connais pas.
+- Une page que tu ecris porte `statut: {statut}` : c'est a l'utilisateur de la
+  valider.
+- Suis les conventions du coffre pour les noms de dossiers et de fichiers.
+- Dans les pages que tu ecris, utilise les liens Obsidian
+  `[[Nom du fichier|Titre affiche]]`, pas les liens de l'outil.
+- Ne propose d'ecrire que si l'utilisateur le demande ou l'accepte. Dans ta
+  reponse, dis en une ou deux phrases ce que tu proposes ; ne recopie pas le
+  contenu, l'utilisateur le voit dans la proposition.
 """
 
 CONSIGNE_ECRITURE_OUTILS = """\
@@ -252,6 +284,18 @@ OUTILS = [
 ]
 
 
+def sans_mj(texte: str) -> str:
+    """Les consignes et les outils, pour un coffre qui n'est pas un jeu."""
+    for avant, apres in (
+        ("du MJ", "de l'utilisateur"),
+        ("au MJ", "a l'utilisateur"),
+        ("le MJ", "l'utilisateur"),
+        ("Le MJ", "L'utilisateur"),
+    ):
+        texte = texte.replace(avant, apres)
+    return texte
+
+
 def url_de_page(chemin: str) -> str:
     return "/page/" + urllib.parse.quote(chemin)
 
@@ -291,7 +335,10 @@ class AssistantMJ:
         contexte_max: int = CONTEXTE_MAX,
         ecriture: Ecriture | None = None,
         proposer: Callable[[dict], dict] | None = None,
+        profil: profils.Profil | None = None,
     ):
+        # Sans profil : un coffre de jeu, comme a l'origine.
+        self.profil = profil or profils.charger(None)
         self.index = index
         self.modele = modele
         self.mode_joueurs = mode_joueurs
@@ -307,6 +354,15 @@ class AssistantMJ:
     @property
     def ecriture_active(self) -> bool:
         return self.ecriture is not None
+
+    def _dire(self, texte: str) -> str:
+        """Le texte tel quel pour un jeu ; sans « MJ » pour les autres coffres."""
+        return texte if self.profil.jeu else sans_mj(texte)
+
+    def outils_ecriture(self) -> list[dict]:
+        if self.profil.jeu:
+            return OUTILS_ECRITURE
+        return json.loads(sans_mj(json.dumps(OUTILS_ECRITURE, ensure_ascii=False)))
 
     # ---------------------------------------------------------------- contexte
 
@@ -334,7 +390,8 @@ class AssistantMJ:
             entete.append("Type : " + page.type)
         if page.statut:
             entete.append("Statut : " + page.statut)
-        entete.append("Visibilite : " + page.visibilite)
+        if self.profil.a("visibilite"):
+            entete.append("Visibilite : " + page.visibilite)
         if page.alias:
             entete.append("Alias : " + ", ".join(page.alias))
         entete.append("Lien a citer : " + url_de_page(page.chemin))
@@ -347,7 +404,8 @@ class AssistantMJ:
         morceaux: list[str] = []
 
         instructions = self.index.instructions()
-        morceaux.append((instructions or INSTRUCTIONS_GENERIQUES).strip())
+        generiques = INSTRUCTIONS_GENERIQUES if self.profil.jeu else INSTRUCTIONS_DOCUMENTATION
+        morceaux.append((instructions or generiques).strip())
         # La consigne depend de ce que le modele sait faire : lui parler d'un
         # outil qu'il n'a pas le pousse a annoncer une lecture impossible.
         supplement = (
@@ -357,8 +415,16 @@ class AssistantMJ:
         if self.mode_joueurs:
             morceaux.append(CONSIGNE_MODE_JOUEURS.strip())
         if self.ecriture_active:
+            consigne = (
+                CONSIGNE_ECRITURE_COMMUNE.format(dossiers=self.ecriture.decrire_dossiers())
+                if self.profil.jeu
+                else CONSIGNE_ECRITURE_DOCUMENTATION.format(
+                    dossiers=self.ecriture.decrire_dossiers(),
+                    statut=self.profil.statut_brouillon,
+                )
+            )
             morceaux.append(
-                CONSIGNE_ECRITURE_COMMUNE.format(dossiers=self.ecriture.decrire_dossiers()).strip()
+                consigne.strip()
                 + "\n"
                 + (CONSIGNE_ECRITURE_OUTILS if self.modele.outils_natifs else CONSIGNE_ECRITURE_BLOCS).strip()
             )
@@ -384,8 +450,8 @@ class AssistantMJ:
                 self.pages_lues.append(page.chemin)
         if blocs_epingles:
             morceaux.append(
-                "# Pages epinglees par le MJ\n\nElles sont toujours fournies, en "
-                "entier.\n\n" + "\n\n---\n\n".join(blocs_epingles)
+                self._dire("# Pages epinglees par le MJ\n\nElles sont toujours fournies, en "
+                "entier.\n\n") + "\n\n---\n\n".join(blocs_epingles)
             )
         return "\n\n---\n\n".join(morceaux)
 
@@ -452,7 +518,7 @@ class AssistantMJ:
             except EcritureRefusee as err:
                 return "Proposition refusee : %s" % err
             rangee = self._garder(proposition)
-            return (
+            return self._dire(
                 "Proposition prete (%s de « %s »). Elle attend la validation du MJ, "
                 "qui la voit sous ta reponse : ne recopie pas son contenu."
                 % ("creation" if rangee["genre"] == "creation" else "modification", rangee["chemin"])
@@ -606,7 +672,7 @@ class AssistantMJ:
 
         if self.modele.outils_natifs:
             messages.append({"role": "user", "content": question})
-            outils = OUTILS + (OUTILS_ECRITURE if self.ecriture_active else [])
+            outils = OUTILS + (self.outils_ecriture() if self.ecriture_active else [])
         else:
             # Variante sans outils : le modele ne peut rien demander, on lui
             # fournit donc les pages d'avance, autant que le budget permet.
@@ -627,7 +693,7 @@ class AssistantMJ:
                     + "\n\n---\n\n".join(self.texte_de_page(p) for p in pages)
                     + "\n\n---\n\n"
                 )
-            messages.append({"role": "user", "content": contexte + "Question du MJ : " + question})
+            messages.append({"role": "user", "content": contexte + self._dire("Question du MJ : ") + question})
             outils = None
 
         texte: list[str] = []

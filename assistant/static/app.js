@@ -14,6 +14,8 @@
     amorceChemin: $("#amorce-chemin"),
     amorceErreur: $("#amorce-erreur"),
     coffreNom: $("#coffre-nom"),
+    marqueTitre: $("#marque-titre"),
+    styleCoffre: $("#style-coffre"),
     choixCoffre: $("#choix-coffre"),
     choixModele: $("#choix-modele"),
     boutonJoueurs: $("#bouton-joueurs"),
@@ -81,7 +83,26 @@
     surCarte: null,
     // L'ecriture dans le coffre : propositions de l'assistant, notes du MJ.
     ecriture: { active: false, dossiers: [], notes: "" },
+    // Le type du coffre (profil.py) : ce que l'interface montre, et ses mots.
+    profil: null,
+    // La feuille de style du coffre actuellement chargee.
+    versionStyle: null,
   };
+
+  /* Un serveur ancien, ou un etat sans profil : le coffre de jeu d'origine. */
+  const PROFIL_JEU = {
+    type: "jeu",
+    fonctions: { mode_joueurs: true, cartes: true, visibilite: true },
+    libelles: {
+      titre: "Assistant de MJ",
+      utilisateur: "MJ",
+      question: "Une question de regle, un PNJ a improviser, une scene a preparer…",
+    },
+    statut_brouillon: "brouillon",
+  };
+  etat.profil = PROFIL_JEU;
+
+  const fonction = (nom) => !!(etat.profil.fonctions || {})[nom];
 
   // ------------------------------------------------------------------ outils
 
@@ -125,8 +146,14 @@
     if (!donnees.coffre) {
       el.amorce.hidden = false;
       el.app.hidden = true;
+      // La page a charge la feuille d'aucun coffre : le premier coffre ouvert
+      // devra charger la sienne.
+      etat.versionStyle = ":";
       return;
     }
+    // Le profil d'abord : l'application ne doit jamais apparaitre avec les
+    // boutons d'un autre type de coffre.
+    appliquerProfil(donnees);
     el.amorce.hidden = true;
     el.app.hidden = false;
 
@@ -198,6 +225,54 @@
       defiler();
     }
     return donnees;
+  }
+
+  /* Le type du coffre : les fonctions propres au jeu (mode joueurs, cartes,
+     visibilite) n'apparaissent que si le coffre les prevoit, et les libelles
+     suivent son vocabulaire. Sans manifeste, c'est le profil de jeu. */
+  function appliquerProfil(donnees) {
+    const p = donnees.profil || PROFIL_JEU;
+    etat.profil = {
+      ...PROFIL_JEU,
+      ...p,
+      fonctions: { ...PROFIL_JEU.fonctions, ...(p.fonctions || {}) },
+      libelles: { ...PROFIL_JEU.libelles, ...(p.libelles || {}) },
+    };
+    const lib = etat.profil.libelles;
+    document.body.dataset.type = etat.profil.type;
+    document.body.dataset.coffre = donnees.coffre ? donnees.coffre.cle : "";
+    el.marqueTitre.textContent = lib.titre;
+    el.question.placeholder = lib.question;
+    el.boutonJoueurs.hidden = !fonction("mode_joueurs");
+    el.filtreVisibilite.hidden = !fonction("visibilite");
+    if (!fonction("visibilite")) el.filtreVisibilite.value = "";
+    (etat.profil.avertissements || []).forEach((a) => console.warn("[coffre] " + a));
+    chargerStyleCoffre(donnees);
+  }
+
+  /* La feuille du coffre est deja chargee par la page au demarrage. On ne la
+     remplace que si le coffre change (ou la feuille elle-meme), et la nouvelle
+     n'evince l'ancienne qu'une fois chargee : pas d'eclair de style. */
+  function chargerStyleCoffre(donnees) {
+    const version = (donnees.coffre ? donnees.coffre.cle : "") + ":" + (donnees.style_coffre || "");
+    if (etat.versionStyle === null) {
+      etat.versionStyle = version;
+      return;
+    }
+    if (etat.versionStyle === version) return;
+    etat.versionStyle = version;
+    const ancienne = el.styleCoffre;
+    const nouvelle = document.createElement("link");
+    nouvelle.rel = "stylesheet";
+    nouvelle.id = "style-coffre";
+    nouvelle.href = "/coffre/style.css?v=" + encodeURIComponent(version);
+    const retirer = () => {
+      if (ancienne.parentNode) ancienne.remove();
+    };
+    nouvelle.addEventListener("load", retirer, { once: true });
+    nouvelle.addEventListener("error", retirer, { once: true });
+    ancienne.after(nouvelle);
+    el.styleCoffre = nouvelle;
   }
 
   /* Le menu des modeles : ceux de Claude, puis ceux qu'Ollama a installes.
@@ -433,11 +508,15 @@
     const pages = (noeud.pages || [])
       .map((p) => {
         const marqueur = p.visibilite ? p.visibilite.slice(0, 2) : "";
+        // Le marqueur mj/jo n'a de sens que pour un coffre qui a des secrets.
+        const repere = fonction("visibilite")
+          ? `<span class="marqueur">${echapper(marqueur)}</span>`
+          : "";
         return (
           `<a class="lien-page" href="/page/${encodeURI(p.chemin)}" ` +
           `data-page="${echapper(p.chemin)}" data-visibilite="${echapper(p.visibilite)}" ` +
           `title="${echapper(p.chemin)}">` +
-          `<span class="marqueur">${echapper(marqueur)}</span>` +
+          repere +
           `<span>${echapper(p.titre)}</span></a>`
         );
       })
@@ -494,7 +573,7 @@
     }
 
     etat.cheminCourant = donnees.chemin;
-    document.title = donnees.titre + " · Assistant de MJ";
+    document.title = donnees.titre + " · " + etat.profil.libelles.titre;
     if (pousser) {
       const lieu = options.focus ? "?lieu=" + encodeURIComponent(options.focus) : "";
       history.pushState(
@@ -576,14 +655,19 @@
     }
 
     const pastilles = [];
-    if (donnees.type) pastilles.push(`<span class="pastille">${echapper(donnees.type)}</span>`);
-    if (donnees.statut) pastilles.push(`<span class="pastille">${echapper(donnees.statut)}</span>`);
-    if (donnees.visibilite)
+    // data-champ / data-valeur : des prises pour la feuille de style d'un coffre
+    // (colorer un statut, par exemple). Le style par defaut ne s'en sert pas.
+    const pastille = (champ, valeur) =>
+      `<span class="pastille" data-champ="${champ}" data-valeur="${echapper(valeur)}">` +
+      `${echapper(valeur)}</span>`;
+    if (donnees.type) pastilles.push(pastille("type", donnees.type));
+    if (donnees.statut) pastilles.push(pastille("statut", donnees.statut));
+    if (donnees.visibilite && fonction("visibilite"))
       pastilles.push(
         `<span class="pastille" data-ton="${echapper(donnees.visibilite)}">` +
           `${echapper(donnees.visibilite)}</span>`
       );
-    if (donnees.secrets)
+    if (donnees.secrets && fonction("mode_joueurs"))
       pastilles.push(
         `<span class="pastille" data-ton="mj">${donnees.secrets} encadre${
           donnees.secrets > 1 ? "s" : ""
@@ -606,8 +690,67 @@
       avis +
       donnees.html;
 
+    rendreFormules(el.page);
     rendreFil(donnees);
     majEpingle(donnees);
+  }
+
+  // Les formules ($...$, $$...$$) arrivent du serveur en TeX brut, dans
+  // .math. KaTeX n'est charge qu'a la premiere page qui en contient : un coffre
+  // sans formule ne le telecharge jamais. Hors ligne, le TeX reste affiche.
+  const KATEX = "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/";
+  let katexPret = null;
+
+  function chargerKatex() {
+    if (katexPret) return katexPret;
+    katexPret = new Promise((resoudre, rejeter) => {
+      const feuille = document.createElement("link");
+      feuille.rel = "stylesheet";
+      feuille.href = KATEX + "katex.min.css";
+      document.head.appendChild(feuille);
+      const script = document.createElement("script");
+      script.src = KATEX + "katex.min.js";
+      script.onload = () => resoudre(window.katex);
+      script.onerror = () => {
+        katexPret = null; // on retentera a la page suivante
+        rejeter(new Error("KaTeX indisponible"));
+      };
+      document.head.appendChild(script);
+    });
+    return katexPret;
+  }
+
+  // Ce que LaTeX accepte et KaTeX non : eqnarray (devient un array a trois
+  // colonnes, meme alignement) et \mbox (devient \text, qui admet $...$).
+  function texPourKatex(tex) {
+    return tex
+      .replace(/\\begin\{eqnarray\*?\}/g, "\\begin{array}{rcl}")
+      .replace(/\\end\{eqnarray\*?\}/g, "\\end{array}")
+      .replace(/\\mbox\{/g, "\\text{");
+  }
+
+  function rendreFormules(racine) {
+    const formules = racine.querySelectorAll(".math:not([data-rendue])");
+    if (!formules.length) return;
+    chargerKatex()
+      .then((katex) => {
+        formules.forEach((f) => {
+          if (!f.isConnected) return;
+          const tex = f.textContent;
+          try {
+            katex.render(texPourKatex(tex), f, {
+              displayMode: f.classList.contains("math-bloc"),
+              throwOnError: false,
+              strict: "ignore",
+            });
+            f.dataset.rendue = "1";
+            f.title = tex;
+          } catch (e) {
+            f.textContent = tex;
+          }
+        });
+      })
+      .catch((e) => console.warn(e.message));
   }
 
   function rendreFil(donnees) {
@@ -895,7 +1038,9 @@
     bloc.className = "tour";
     bloc.dataset.role = role;
     const nom =
-      role === "user" ? "MJ" : role === "assistant" ? "Assistant" : "Probleme";
+      role === "user"
+        ? etat.profil.libelles.utilisateur
+        : role === "assistant" ? "Assistant" : "Probleme";
     bloc.innerHTML =
       `<span class="tour-role">${nom}</span><div class="tour-corps"></div>`;
     const corps = bloc.querySelector(".tour-corps");
@@ -1201,7 +1346,9 @@
     const date = new Date().toISOString().slice(0, 10);
     const titre = question ? question.querySelector(".tour-corps").textContent.trim().slice(0, 90) : sujet;
     const contenu =
-      `---\ntype: note\nstatut: brouillon\nvisibilite: mj\n---\n\n# ${titre}\n\n` +
+      `---\ntype: note\nstatut: ${etat.profil.statut_brouillon || "brouillon"}\n` +
+      (fonction("visibilite") ? "visibilite: mj\n" : "") +
+      `---\n\n# ${titre}\n\n` +
       versObsidian(bloc.texteBrut || "").trim() + "\n";
     const form = document.createElement("form");
     form.className = "proposition note-form";

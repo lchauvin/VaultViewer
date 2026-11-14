@@ -336,6 +336,9 @@ def essais_interface(r: Rapport) -> None:
     r.verifie("la page appelle le script", "/static/app.js" in html)
     r.verifie("la page appelle la carte avant le script",
               0 <= html.find("/static/carte.js") < html.find("/static/app.js"))
+    r.verifie("la feuille du coffre vient apres le style par defaut",
+              0 <= html.find("/static/style.css") < html.find("/coffre/style.css"),
+              "sinon elle ne pourrait rien surcharger")
 
     # Les controles de la barre du haut : les selecteurs portent un libelle
     # au-dessus, pas les boutons. Centrer la rangee les desaligne ; il faut
@@ -822,10 +825,218 @@ def essais_secrets(r: Rapport) -> None:
         shutil.rmtree(dossier, ignore_errors=True)
 
 
+def essais_profil(r: Rapport) -> None:
+    """Le type d'un coffre : manifeste, fonctions coupees, style propre.
+
+    Le risque principal : qu'un coffre sans manifeste (Recursion) change.
+    Il doit garder exactement le comportement d'origine.
+    """
+    print("\n== type de coffre ==")
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    from . import profil as profils
+    from .config import Coffre, Config
+    from .ecriture import pas_un_modele
+    from .etat import Etats
+    from .serveur import Application, Gestionnaire
+
+    dossier = Path(tempfile.mkdtemp(prefix="essai-profil-"))
+    try:
+        jeu = dossier / "jeu"
+        doc = dossier / "doc"
+        for racine in (jeu, doc):
+            fabriquer_coffre(racine)
+            for nom, contenu in CARTE_ESSAI.items():
+                (racine / nom).write_text(contenu, encoding="utf-8")
+        (doc / ".assistant").mkdir()
+        manifeste = doc / ".assistant" / "coffre.toml"
+        manifeste.write_text(
+            'type = "documentation"\nstatut_brouillon = "draft"\n\n'
+            '[libelles]\ntitre = "Ma doc"\n',
+            encoding="utf-8",
+        )
+
+        # --- le manifeste
+        p = profils.charger(jeu)
+        r.verifie("sans manifeste, un coffre est un coffre de jeu", p.type == "jeu" and p.jeu)
+        r.verifie("le profil de jeu garde toutes ses fonctions",
+                  all(p.fonctions.values()) and set(p.fonctions) == {"mode_joueurs", "cartes", "visibilite"})
+        r.verifie("le profil de jeu garde ses libelles d'origine",
+                  p.libelles["titre"] == "Assistant de MJ" and p.libelles["utilisateur"] == "MJ")
+        r.verifie("le profil de jeu garde le statut « brouillon »", p.statut_brouillon == "brouillon")
+
+        p = profils.charger(doc)
+        r.verifie("le manifeste declare un coffre de documentation", p.type == "documentation")
+        r.verifie("la documentation n'a ni mode joueurs, ni cartes, ni visibilite",
+                  not any(p.fonctions.values()), str(p.fonctions))
+        r.verifie("un libelle du manifeste remplace celui du type", p.libelles["titre"] == "Ma doc")
+        r.verifie("le statut de brouillon vient du manifeste", p.statut_brouillon == "draft")
+
+        manifeste.write_text('type = "docs"\n[fonctions]\ncartes = true\nvolant = true\n', encoding="utf-8")
+        p = profils.charger(doc)
+        r.verifie("un synonyme de type est accepte", p.type == "documentation")
+        r.verifie("une fonction peut etre reactivee", p.a("cartes") and not p.a("mode_joueurs"))
+        r.verifie("une fonction inconnue est signalee", any("volant" in a for a in p.avertissements))
+
+        manifeste.write_text('type = "roman"\n', encoding="utf-8")
+        p = profils.charger(doc)
+        r.verifie("un type inconnu retombe sur le jeu, avec un avertissement",
+                  p.type == "jeu" and p.avertissements)
+        manifeste.write_text("type = = \n", encoding="utf-8")
+        r.verifie("un manifeste illisible retombe sur le jeu",
+                  profils.charger(doc).type == "jeu")
+        manifeste.write_text('type = "documentation"\nstatut_brouillon = "draft"\n', encoding="utf-8")
+
+        r.verifie("le dossier .assistant n'entre pas dans l'index",
+                  not any(c.startswith(".assistant") for c in Index(doc).pages))
+
+        # --- le serveur sur un coffre de documentation
+        cfg = Config(
+            coffres={
+                "jeu": Coffre(cle="jeu", chemin=jeu, nom="Jeu"),
+                "doc": Coffre(cle="doc", chemin=doc, nom="Doc"),
+            },
+            coffre_par_defaut="doc",
+        )
+        app = Application(cfg)
+        app.etats = Etats(dossier / "etat")  # jamais l'etat de l'utilisateur
+        # Un mode joueurs reste actif d'un usage passe : il doit etre ignore.
+        app.etats.definir_mode_joueurs("doc", True)
+        r.verifie("documentation : un mode joueurs enregistre est ignore", app.mode_joueurs() is False)
+        page = app.rendre_page("Secrete")
+        r.verifie("documentation : une page `visibilite: mj` reste lisible",
+                  "MOT-SECRET-DE-PAGE" in page.get("html", ""))
+        page = app.rendre_page("Carte")
+        r.verifie("documentation : une page `type: carte` s'affiche en texte",
+                  page.get("est_carte") is False and "<table>" in page.get("html", ""))
+        r.verifie("documentation : aucune page n'est situee sur une carte",
+                  app.rendre_page("Publique").get("sur_carte") is None)
+        r.verifie("documentation : la route de la carte refuse",
+                  app.rendre_carte("Carte").get("erreur") == "introuvable")
+        etat = app.etat_complet()
+        r.verifie("documentation : /api/etat ne liste aucune carte", etat.get("cartes") == [])
+        r.verifie("documentation : /api/etat porte le profil",
+                  (etat.get("profil") or {}).get("type") == "documentation")
+        r.verifie("documentation : une proposition prend le statut du coffre",
+                  app.ecriture().statut_brouillon == "draft")
+        # Le chemin complet d'une question, ou profil, ecriture et modele se
+        # rencontrent. Le modele muet ne touche pas au reseau.
+        for outils in (True, False):
+            app.modele = lambda outils=outils: ModeleMuet(outils=outils)
+            try:
+                evenements = list(app.flux_conversation("Que dit la page publique ?"))
+                passe = not any(e.get("type") == "erreur" for e in evenements)
+                detail = str([e.get("type") for e in evenements])
+            except Exception as err:  # noqa: BLE001
+                passe, detail = False, repr(err)
+            r.verifie("documentation : une question aboutit (outils=%s)" % outils, passe, detail)
+        del app.modele
+
+        cfg.coffre_par_defaut = "jeu"
+        app.etats.definir_mode_joueurs("jeu", True)
+        r.verifie("jeu : le mode joueurs fonctionne toujours", app.mode_joueurs() is True)
+        r.verifie("jeu : la page `type: carte` reste une carte", app.rendre_page("Carte").get("est_carte") is True)
+        r.verifie("jeu : la page MJ reste masquee en mode joueurs",
+                  app.rendre_page("Secrete").get("erreur") == "reservee")
+        app.etats.definir_mode_joueurs("jeu", False)
+
+        # --- les consignes du modele
+        idx_doc = Index(doc)
+        (doc / "CLAUDE.md").unlink(missing_ok=True)
+        aide_doc = AssistantMJ(idx_doc, ModeleMuet(), ecriture=app.ecriture(), profil=profils.charger(doc))
+        consignes = aide_doc.systeme([])
+        r.verifie("documentation : les consignes ne parlent jamais de MJ",
+                  " MJ" not in consignes and "partie de jeu" not in consignes)
+        outils = _json.dumps(aide_doc.outils_ecriture(), ensure_ascii=False)
+        r.verifie("documentation : les outils d'ecriture ne parlent pas de MJ", "MJ" not in outils)
+        idx_jeu = Index(jeu)
+        sans = AssistantMJ(idx_jeu, ModeleMuet()).systeme([])
+        avec = AssistantMJ(idx_jeu, ModeleMuet(), profil=profils.charger(jeu)).systeme([])
+        r.verifie("jeu : les consignes sont identiques a celles d'origine", sans == avec)
+
+        r.verifie("une page creee d'apres un modele prend le statut du coffre",
+                  "statut: draft" in pas_un_modele("---\ntype: modele\nstatut: modele\n---\n# X\n", "draft"))
+        r.verifie("sans statut donne, c'est toujours « brouillon »",
+                  "statut: brouillon" in pas_un_modele("---\ntype: modele\nstatut: modele\n---\n# X\n"))
+
+        # --- la feuille de style du coffre, par HTTP
+        Gestionnaire.app = app
+        serveur = ThreadingHTTPServer(("127.0.0.1", 0), Gestionnaire)
+        fil = threading.Thread(target=serveur.serve_forever, daemon=True)
+        fil.start()
+        base = "http://127.0.0.1:%d" % serveur.server_address[1]
+
+        def lire(chemin: str) -> tuple[int, str, str]:
+            try:
+                with urllib.request.urlopen(base + chemin, timeout=5) as rep:
+                    return rep.status, rep.headers.get("Content-Type", ""), rep.read().decode("utf-8")
+            except urllib.error.HTTPError as err:
+                return err.code, "", ""
+
+        try:
+            code, genre, corps = lire("/coffre/style.css")
+            r.verifie("sans feuille propre, la route rend une feuille vide (pas d'erreur)",
+                      code == 200 and "text/css" in genre and "{" not in corps, corps[:80])
+            cfg.coffre_par_defaut = "doc"
+            (doc / ".assistant" / "style.css").write_text(":root { --accent: #123456; }", encoding="utf-8")
+            code, genre, corps = lire("/coffre/style.css")
+            r.verifie("la feuille du coffre est servie", code == 200 and "#123456" in corps)
+            r.verifie("sa version change avec elle", profils.version_style(doc) != "")
+            code, _, _ = lire("/coffre/../config.py")
+            r.verifie("la route ne sert rien d'autre que style.css", code == 404)
+            code, _, _ = lire("/coffre/coffre.toml")
+            r.verifie("le manifeste n'est pas servi", code == 404)
+            sonde = urllib.request.Request(
+                base + "/api/mode-joueurs", data=b'{"actif": true}', method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                urllib.request.urlopen(sonde, timeout=5)
+                refuse = False
+            except urllib.error.HTTPError as err:
+                refuse = err.code == 400
+            r.verifie("documentation : le mode joueurs est refuse par l'API", refuse)
+        finally:
+            serveur.shutdown()
+            serveur.server_close()
+    finally:
+        shutil.rmtree(dossier, ignore_errors=True)
+
+
+def essais_formules(r: Rapport) -> None:
+    """Les formules TeX passent intactes jusqu'au navigateur (KaTeX)."""
+    print("\n== formules ==")
+    en_ligne = rendu.rendre_en_ligne
+    h = en_ligne(r"ou $R'$ et $s_{low}$ sont *lus*")
+    r.verifie("formule en ligne isolee", '<span class="math">R&#x27;</span>' in h)
+    r.verifie("le _ d'une formule n'est pas de l'italique", "s_{low}</span>" in h and "<em>lus</em>" in h)
+    r.verifie("une formule garde ses *", '<span class="math">a * b</span>' in en_ligne("$a * b$ et *c*"))
+    r.verifie("des montants ne sont pas des formules", "math" not in en_ligne("5$ et 10$, ou $5 et $10"))
+    r.verifie("les variables de PixelMath ne sont pas des formules",
+              "math" not in en_ligne("v = p($T, X()*width($T), Y()*height($T)) ou **iif($T < 0, 0, $T)**"))
+    r.verifie("pas de formule dans du code", "math" not in en_ligne("`$x$`"))
+    bloc = rendu.rendre("Avant\n$$\na \\\\ b_1 * c\n$$\napres $k$").html
+    r.verifie(
+        "formule en bloc sur plusieurs lignes",
+        '<div class="math math-bloc">a \\\\ b_1 * c</div>' in bloc and "<p>Avant</p>" in bloc,
+        bloc,
+    )
+    r.verifie("le texte apres une formule en bloc", '<p>apres <span class="math">k</span></p>' in bloc)
+    r.verifie("formule en bloc sur une ligne", rendu.rendre("$$y=x$$").html == '<div class="math math-bloc">y=x</div>')
+    r.verifie("$$ dans un paragraphe : pas de <div> dans un <p>", "<div" not in rendu.rendre("vu $$x$$ ici").html)
+    r.verifie("$$ sans fin : du texte", "math" not in rendu.rendre("$$ ouvert\nfin").html)
+    r.verifie("le TeX est echappe", "&lt;b&gt;" in en_ligne("$a<b>c$"))
+
+
 def principal(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     r = Rapport()
     essais_interface(r)
+    essais_profil(r)
+    essais_formules(r)
     essais_parametres(r)
     essais_secrets(r)
     essais_carte(r)

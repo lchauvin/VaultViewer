@@ -49,8 +49,10 @@ class EcritureRefusee(Exception):
 
 
 class Ecriture:
-    def __init__(self, index: Index, dossiers: list[str]):
+    def __init__(self, index: Index, dossiers: list[str], statut_brouillon: str = "brouillon"):
         self.index = index
+        # Le statut d'une page creee d'apres un modele : chaque coffre a le sien.
+        self.statut_brouillon = statut_brouillon or "brouillon"
         self.racine = Path(index.racine)
         self.dossiers = [d.strip().strip("/\\").replace("\\", "/") for d in dossiers if d and d.strip()]
 
@@ -110,7 +112,7 @@ class Ecriture:
 
     def preparer_creation(self, chemin: str, contenu: str, resume: str = "") -> dict:
         chemin, fichier = self._verifier(chemin)
-        contenu = pas_un_modele(_normaliser(contenu))
+        contenu = pas_un_modele(_normaliser(contenu), self.statut_brouillon)
         if not contenu.strip():
             raise EcritureRefusee("Contenu vide.")
         if len(contenu) > TAILLE_MAX:
@@ -218,13 +220,14 @@ def blocs_de(texte: str) -> list[dict]:
 
 # ------------------------------------------------------------------ outils
 
-def pas_un_modele(contenu: str) -> str:
+def pas_un_modele(contenu: str, statut_brouillon: str = "brouillon") -> str:
     """Une page creee a partir d'un modele n'est pas un modele.
 
     Un modele se reconnait a `type: modele` (et souvent `modele_de: X`) ou a
     `statut: modele`. Recopie tel quel, il ferait de la nouvelle page un
     modele de plus, que l'assistant refuserait ensuite de completer. La page
-    prend donc le type `X` du modele, et le statut `brouillon`.
+    prend donc le type `X` du modele, et le statut `brouillon` (ou celui que
+    le coffre declare, voir profil.py).
     """
     m = re.match(r"---\n(.*?)\n---(\n|$)", contenu, re.DOTALL)
     if not m:
@@ -252,7 +255,7 @@ def pas_un_modele(contenu: str) -> str:
                 sortie.append("type: " + nouveau_type)
             continue
         if cle == "statut" and statut_modele:
-            sortie.append("statut: brouillon")
+            sortie.append("statut: " + statut_brouillon)
             continue
         sortie.append(ligne)
     return "---\n" + "\n".join(sortie) + "\n---" + m.group(2) + contenu[m.end():]

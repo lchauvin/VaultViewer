@@ -18,6 +18,7 @@ from pathlib import Path
 
 from . import carte as cartes
 from . import modele as modeles
+from . import profil as profils
 from .assistant_mj import AssistantMJ, url_de_page
 from .coffre import CoffreIntrouvable, HorsCoffre, Index
 from .ecriture import Ecriture, EcritureRefusee
@@ -60,19 +61,36 @@ class Application:
         coffre = self.coffre_courant
         return self.etats.pour(coffre.cle if coffre else "aucun")
 
+    def profil(self) -> profils.Profil:
+        """Le type du coffre courant, relu a chaque requete (voir profil.py)."""
+        coffre = self.coffre_courant
+        return profils.charger(coffre.chemin if coffre else None)
+
+    def mode_joueurs(self) -> bool:
+        """Le mode joueurs n'existe que si le type du coffre le prevoit.
+
+        L'etat enregistre peut le dire actif pour un coffre devenu un coffre
+        de documentation : sans ce filtre, le coffre resterait filtre sans
+        bouton pour en sortir.
+        """
+        return self.etat().mode_joueurs and self.profil().a("mode_joueurs")
+
+    def cartes_actives(self) -> bool:
+        return self.profil().a("cartes")
+
     def ecriture(self) -> Ecriture | None:
         """Ce que l'assistant peut ecrire dans le coffre courant, apres validation."""
         coffre = self.coffre_courant
         if coffre is None:
             return None
-        return Ecriture(self.index(), coffre.zones_ecriture)
+        return Ecriture(self.index(), coffre.zones_ecriture, self.profil().statut_brouillon)
 
     def ecrire(self, corps: dict) -> dict:
         """Ecrit une proposition validee par le MJ, ou une note qu'il a composee."""
         coffre = self.coffre_courant
         if coffre is None:
             raise EcritureRefusee("Aucun coffre ouvert.")
-        if self.etat().mode_joueurs:
+        if self.mode_joueurs():
             raise EcritureRefusee("Pas d'ecriture en mode joueurs.")
         ecriture = self.ecriture()
         contenu = corps.get("contenu")
@@ -123,7 +141,7 @@ class Application:
         page = index.page(chemin)
         if page is None:
             return {"erreur": "introuvable", "chemin": chemin}
-        if etat.mode_joueurs and page.reserve_mj:
+        if self.mode_joueurs() and page.reserve_mj:
             return {
                 "erreur": "reservee",
                 "chemin": page.chemin,
@@ -135,11 +153,14 @@ class Application:
             cible = index.resoudre(nom)
             if cible is None:
                 return None
-            if etat.mode_joueurs and cible.reserve_mj:
+            if self.mode_joueurs() and cible.reserve_mj:
                 return None
             return (url_de_page(cible.chemin), True)
 
-        resultat = rendu.rendre(page.corps, resoudre, etat.mode_joueurs)
+        resultat = rendu.rendre(page.corps, resoudre, self.mode_joueurs())
+        # Sans la fonction « cartes », une page `type: carte` est une page comme
+        # une autre : ses tableaux s'affichent en texte.
+        est_carte = self.cartes_actives() and cartes.est_carte(page)
         return {
             "chemin": page.chemin,
             "titre": page.titre,
@@ -156,25 +177,25 @@ class Application:
             "liens_casses": resultat.liens_casses,
             "secrets": resultat.secrets,
             "epinglee": page.chemin in etat.epingles,
-            "est_carte": cartes.est_carte(page),
+            "est_carte": est_carte,
             # La carte ou figure ce lieu, pour le bouton « Sur la carte ».
             "sur_carte": None
-            if cartes.est_carte(page)
-            else cartes.situer(index, page.chemin, etat.mode_joueurs),
+            if est_carte or not self.cartes_actives()
+            else cartes.situer(index, page.chemin, self.mode_joueurs()),
         }
 
     def rendre_carte(self, chemin: str) -> dict:
         index = self.index()
         etat = self.etat()
         page = index.page(chemin)
-        if page is None or not cartes.est_carte(page):
+        if page is None or not cartes.est_carte(page) or not self.cartes_actives():
             return {"erreur": "introuvable", "chemin": chemin}
-        if etat.mode_joueurs and page.reserve_mj:
+        if self.mode_joueurs() and page.reserve_mj:
             return {"erreur": "reservee", "message": "Carte reservee au MJ."}
-        donnees = cartes.construire(index, page, etat.mode_joueurs)
+        donnees = cartes.construire(index, page, self.mode_joueurs())
         for noeud in donnees["noeuds"]:
             noeud["url"] = url_de_page(noeud["page"]) if noeud["page"] else None
-        donnees["mode_joueurs"] = etat.mode_joueurs
+        donnees["mode_joueurs"] = self.mode_joueurs()
         return donnees
 
     def etat_complet(self) -> dict:
@@ -217,6 +238,9 @@ class Application:
             "hote": self.cfg.hote,
             "port": self.cfg.port,
             "config": str(self.cfg.source) if self.cfg.source else None,
+            # Le type du coffre : ce que l'interface montre, et comment elle le nomme.
+            "profil": self.profil().vers_json(),
+            "style_coffre": profils.version_style(coffre.chemin if coffre else None),
         }
         if coffre is None:
             base.update({"coffre": None, "pret": False})
@@ -240,7 +264,7 @@ class Application:
             page = index.page(chemin)
             if page is None:
                 continue
-            if etat.mode_joueurs and page.reserve_mj:
+            if self.mode_joueurs() and page.reserve_mj:
                 continue
             epingles.append({"chemin": page.chemin, "titre": page.titre, "url": url_de_page(page.chemin)})
 
@@ -255,22 +279,24 @@ class Application:
                     "instructions": index.instructions() is not None,
                 },
                 "pret": True,
-                "mode_joueurs": etat.mode_joueurs,
+                "mode_joueurs": self.mode_joueurs(),
                 "epingles": epingles,
                 "types": index.types(),
                 "accueil": accueil.chemin if accueil else None,
                 "cartes": [
                     {"chemin": c.chemin, "titre": c.titre}
-                    for c in cartes.cartes(index, etat.mode_joueurs)
-                ],
+                    for c in cartes.cartes(index, self.mode_joueurs())
+                ]
+                if self.cartes_actives()
+                else [],
                 "conversation": etat.conversation,
                 # Les propositions peuvent contenir des secrets : jamais en mode joueurs.
                 "ecriture": {
-                    "active": not etat.mode_joueurs,
+                    "active": not self.mode_joueurs(),
                     "dossiers": coffre.zones_ecriture,
                     "notes": coffre.dossier_notes,
                 },
-                "propositions": [] if etat.mode_joueurs else etat.propositions,
+                "propositions": [] if self.mode_joueurs() else etat.propositions,
             }
         )
         return base
@@ -293,10 +319,11 @@ class Application:
         assistant = AssistantMJ(
             index,
             self.modele(),
-            etat.mode_joueurs,
+            self.mode_joueurs(),
             self.cfg.contexte_max,
-            ecriture=Ecriture(index, coffre.zones_ecriture),
+            ecriture=Ecriture(index, coffre.zones_ecriture, self.profil().statut_brouillon),
             proposer=lambda proposition: self.etats.ajouter_proposition(coffre.cle, proposition),
+            profil=self.profil(),
         )
         historique = list(etat.conversation)
         self.etats.ajouter_message(coffre.cle, "user", question)
@@ -384,11 +411,13 @@ class Gestionnaire(BaseHTTPRequestHandler):
                 return self._servir_statique(chemin[len("/static/") :])
             if chemin == "/favicon.ico":
                 return self._servir_statique("favicon.svg")
+            if chemin == "/coffre/style.css":
+                return self._servir_style_coffre()
             if chemin == "/api/etat":
                 return self._json(self.app.etat_complet())
             if chemin == "/api/arbre":
                 etat = self.app.etat()
-                return self._json(self.app.index().arbre(etat.mode_joueurs))
+                return self._json(self.app.index().arbre(self.app.mode_joueurs()))
             if chemin == "/api/page":
                 demande = (params.get("chemin") or [""])[0]
                 if not demande:
@@ -403,11 +432,14 @@ class Gestionnaire(BaseHTTPRequestHandler):
                 return self._json(resultat, code)
             if chemin == "/api/recherche":
                 etat = self.app.etat()
+                visibilite = (params.get("visibilite") or [""])[0]
+                if not self.app.profil().a("visibilite"):
+                    visibilite = ""
                 resultats = self.app.index().chercher(
                     (params.get("q") or [""])[0],
                     type_=(params.get("type") or [""])[0],
-                    visibilite=(params.get("visibilite") or [""])[0],
-                    mode_joueurs=etat.mode_joueurs,
+                    visibilite=visibilite,
+                    mode_joueurs=self.app.mode_joueurs(),
                 )
                 return self._json({"resultats": resultats})
             if chemin == "/api/ollama":
@@ -489,6 +521,8 @@ class Gestionnaire(BaseHTTPRequestHandler):
                 coffre = self.app.coffre_courant
                 if coffre is None:
                     return self._json({"erreur": "aucun coffre"}, 400)
+                if not self.app.profil().a("mode_joueurs"):
+                    return self._json({"erreur": "pas de mode joueurs pour ce type de coffre"}, 400)
                 self.app.etats.definir_mode_joueurs(coffre.cle, bool(corps.get("actif")))
                 return self._json(self.app.etat_complet())
 
@@ -572,16 +606,34 @@ class Gestionnaire(BaseHTTPRequestHandler):
             type_mime += "; charset=utf-8"
         self._envoyer(200, cible.read_bytes(), type_mime)
 
+    def _servir_style_coffre(self) -> None:
+        """La feuille de style du coffre courant, posee apres style.css.
+
+        Un seul fichier, a un chemin fixe : la route ne prend aucun parametre,
+        donc rien ne peut lui faire lire un autre fichier (le serveur peut
+        ecouter sur le reseau). Sans feuille propre, une feuille vide : le
+        style par defaut s'applique, et le navigateur ne signale aucune erreur.
+        """
+        coffre = self.app.coffre_courant
+        fichier = profils.fichier_style(coffre.chemin if coffre else None)
+        corps = b"/* Aucun style propre a ce coffre : le style par defaut s'applique. */\n"
+        if fichier is not None:
+            try:
+                corps = fichier.read_bytes()
+            except OSError:
+                pass
+        self._envoyer(200, corps, "text/css; charset=utf-8")
+
     def _servir_brut(self, chemin: str) -> None:
         """Le Markdown tel quel, pour verifier ce que l'outil a lu."""
         index = self.app.index()
         page = index.page(chemin)
         if page is None:
             return self._texte("Introuvable", 404)
-        if self.app.etat().mode_joueurs and page.reserve_mj:
+        if self.app.mode_joueurs() and page.reserve_mj:
             return self._texte("Page reservee au MJ.", 403)
         corps = page.corps
-        if self.app.etat().mode_joueurs:
+        if self.app.mode_joueurs():
             corps = rendu.retirer_secrets(corps)
         self._texte(corps)
 

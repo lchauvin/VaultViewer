@@ -21,6 +21,13 @@ aucun coffre n'est connu, la page demande le chemin du dossier et l'enregistre.
 Rien a installer : le serveur, le rendu Markdown et la recherche n'utilisent
 que la bibliotheque standard de Python (3.11 ou plus recent, pour `tomllib`).
 
+Les formules, comme dans Obsidian (`$...$` en ligne, `$$...$$` en bloc), sont
+rendues dans le navigateur par KaTeX, charge depuis jsDelivr a la premiere page
+qui en contient : un coffre sans formule ne le telecharge jamais, et hors ligne
+le TeX reste affiche tel quel. Un `$` suivi d'une lettre ou d'un chiffre ne
+ferme pas une formule : les montants et les variables de PixelMath (`$T`)
+restent du texte.
+
 ### Choisir le coffre
 
 Dans cet ordre de priorite :
@@ -224,6 +231,61 @@ Les pages epinglees, le mode joueurs, l'historique de conversation et les
 propositions en attente sont ranges hors du coffre, dans le dossier de donnees
 de l'utilisateur.
 
+## Le type du coffre, et son style
+
+Un coffre peut declarer son type, et habiller l'interface a sa facon, dans
+un dossier cache a sa racine (Obsidian et l'index l'ignorent) :
+
+```
+<coffre>/.assistant/coffre.toml    le type et ses reglages
+<coffre>/.assistant/style.css      la feuille de style du coffre (optionnelle)
+```
+
+```toml
+type = "documentation"          # ou "jeu"
+statut_brouillon = "draft"      # le statut d'une page ecrite par l'assistant
+
+[fonctions]                     # activer ou couper une fonction du type
+cartes = true
+
+[libelles]                      # renommer ce que l'interface affiche
+titre = "Documentation PixInsight"
+```
+
+| Type | Mode joueurs | Cartes | Visibilite (filtre, marqueurs) | Libelles |
+| --- | --- | --- | --- | --- |
+| `jeu` (par defaut) | oui | oui | oui | « Assistant de MJ », « MJ » |
+| `documentation` | non | non | non | « Lecteur de documentation », « Vous » |
+
+**Sans manifeste, un coffre est un coffre de jeu** : c'est le comportement
+d'origine, et un coffre existant n'a rien a changer. `game`, `jdr`, `doc` et
+`docs` sont acceptes comme synonymes ; un type inconnu ou un manifeste
+illisible retombe sur `jeu`, avec un avertissement dans la console du
+navigateur. Les libelles reglables sont `titre`, `utilisateur` (le nom de
+celui qui pose les questions) et `question` (le texte d'invite).
+
+Pour un coffre de documentation, le serveur coupe lui-meme ce qui est propre
+au jeu : le mode joueurs est refuse (et ignore s'il etait reste actif), une
+page `type: carte` s'affiche comme du texte, et les consignes de l'assistant
+ne parlent ni de MJ, ni de partie. Elles restent identiques pour un jeu.
+
+**La feuille de style** est posee *apres* celle de l'outil : elle n'a qu'a
+redefinir ce qui change, en general les jetons de `:root` (`--fond`,
+`--surface`, `--texte`, `--accent`, `--titre`, `--corps`, `--mono`...). Sans
+feuille propre, le style par defaut s'applique tel quel. Quelques prises
+pour la cibler :
+
+| Prise | Exemple |
+| --- | --- |
+| `body[data-type="..."]`, `body[data-coffre="<cle>"]` | un style par type, ou par coffre |
+| `.encadre-<genre>` | `.encadre-warning`, `.encadre-info`... pour les encadres `> [!genre]` |
+| `.pastille[data-champ="statut"][data-valeur="..."]` | colorer une valeur de metadonnee en tete de page |
+
+La feuille est relue a chaque chargement, et rechargee quand on change de
+coffre ou qu'elle change elle-meme. Le serveur ne sert que ce fichier-la,
+a un chemin fixe (`/coffre/style.css`) : une feuille qui veut une police ou
+une image les prend sur le web (`@import`, `url(https://...)`).
+
 ## Ecrire dans le coffre
 
 L'assistant peut **proposer** d'ecrire : creer la page d'une campagne a partir
@@ -354,6 +416,7 @@ l'outil fonctionne sur un dossier de notes quelconque.
 assistant/
   __main__.py       point d'entree : python -m assistant
   config.py         configuration, coffres, ligne de commande
+  profil.py         le type d'un coffre (.assistant/coffre.toml) et sa feuille de style
   coffre.py         index, arborescence, recherche, resolution des liens
   rendu.py          Markdown -> HTML (metadonnees, tableaux, encadres, [[liens]])
   carte.py          pages `type: carte` : lieux, placement, secrets
